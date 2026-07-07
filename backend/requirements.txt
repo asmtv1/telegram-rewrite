@@ -1,0 +1,14 @@
+fastapi==0.116.0
+uvicorn[standard]==0.35.0
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+aiosqlite==0.21.0
+pydantic-settings==2.10.1
+telethon==1.40.0
+openai==1.93.0
+cryptography==45.0.5
+pytest==8.4.1
+pytest-asyncio==1.0.0
+httpx==0.28.1
+itsdangerous==2.2.0
+python-multipart==0.0.20

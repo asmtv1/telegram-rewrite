@@ -1,0 +1,157 @@
+name: Deploy testovoe3
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-testovoe3
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: 89.125.250.84
+  DEPLOY_DOMAIN: testovoe3.gafus.ru
+  DEPLOY_PATH: /opt/testovoe3
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Pack project
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='backend/.venv' \
+            --exclude='frontend/node_modules' \
+            --exclude='frontend/dist' \
+            --exclude='*.db' \
+            --exclude='backend/sessions' \
+            -czf /tmp/testovoe3-release.tgz .
+
+      - name: Upload release archive
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" /tmp/testovoe3-release.tgz "$SSH_USER@$DEPLOY_HOST:/tmp/testovoe3-release.tgz"
+
+      - name: Deploy with Docker Compose
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB || 'testovoe3' }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER || 'testovoe3' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          APP_USERS: ${{ secrets.APP_USERS }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL || 'deepseek-v4-flash' }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/testovoe3.env <<ENVEOF
+          POSTGRES_DB=$POSTGRES_DB
+          POSTGRES_USER=$POSTGRES_USER
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+
+          DATABASE_URL=$DATABASE_URL
+          SESSION_SECRET=$SESSION_SECRET
+          APP_USERS=$APP_USERS
+
+          DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY
+          DEEPSEEK_BASE_URL=$DEEPSEEK_BASE_URL
+          DEEPSEEK_MODEL=$DEEPSEEK_MODEL
+
+          TELEGRAM_API_ID=$TELEGRAM_API_ID
+          TELEGRAM_API_HASH=$TELEGRAM_API_HASH
+          APP_ENCRYPTION_KEY=$APP_ENCRYPTION_KEY
+          TELEGRAM_SESSIONS_DIR=/app/sessions
+          MEDIA_DIR=/app/media
+          MEDIA_URL_PREFIX=/media
+          ENVEOF
+
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" /tmp/testovoe3.env "$SSH_USER@$DEPLOY_HOST:/tmp/testovoe3.env"
+
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$DEPLOY_HOST" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH"
+          tar -xzf /tmp/testovoe3-release.tgz -C "$DEPLOY_PATH"
+          rm -f /tmp/testovoe3-release.tgz
+          mv /tmp/testovoe3.env "$DEPLOY_PATH/.env"
+          chmod 600 "$DEPLOY_PATH/.env"
+
+          docker compose --env-file .env up -d --build --remove-orphans
+          docker compose --env-file .env ps
+          REMOTE
+
+      - name: Smoke check
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 30 --retry-delay 2 --retry-connrefused "https://$DEPLOY_DOMAIN/api/health"
