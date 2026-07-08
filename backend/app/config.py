@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    llm_provider: str = "deepseek"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: float = 45.0
     app_encryption_key: str
     telegram_api_id: int = 0
     telegram_api_hash: str = ""

@@ -26,6 +26,12 @@ async def create_schema(engine) -> None:
         )
         if "published_at" not in columns:
             await connection.execute(text("ALTER TABLE posts ADD COLUMN published_at TIMESTAMP"))
+        if "published_message_id" not in columns:
+            await connection.execute(text("ALTER TABLE posts ADD COLUMN published_message_id INTEGER"))
+        if "published_url" not in columns:
+            await connection.execute(text("ALTER TABLE posts ADD COLUMN published_url VARCHAR(512)"))
+        if "source_channel_id" not in columns:
+            await connection.execute(text("ALTER TABLE posts ADD COLUMN source_channel_id VARCHAR(255)"))
         if "media_urls" not in columns:
             await connection.execute(text("ALTER TABLE posts ADD COLUMN media_urls JSON DEFAULT '[]' NOT NULL"))
         if "published_media_urls" not in columns:

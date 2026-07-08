@@ -42,7 +42,7 @@ async def send_code(
             payload.phone,
         )
     except TelegramServiceError as exc:
-        raise HTTPException(status_code=400, detail=exc.code) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return {"ok": True}
 
 
@@ -58,7 +58,7 @@ async def sign_in(
     except PasswordRequired:
         return {"password_required": True}
     except TelegramServiceError as exc:
-        raise HTTPException(status_code=400, detail=exc.code) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return {"ok": True, "password_required": False}
 
 
@@ -72,7 +72,7 @@ async def password(
     try:
         await request.app.state.telegram_service.sign_in_password(session, user_id, payload.password)
     except TelegramServiceError as exc:
-        raise HTTPException(status_code=400, detail=exc.code) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return {"ok": True}
 
 

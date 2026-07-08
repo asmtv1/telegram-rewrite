@@ -272,7 +272,7 @@ function HistoryView() {
           return (
             <article className="history-item" key={post.id}>
               <div className="history-meta">
-                <span>{post.publish_status}</span>
+                <span className={`status-badge ${post.publish_status}`}>{publishStatusLabel(post.publish_status)}</span>
                 <span>{post.source_channel} #{post.telegram_message_id}</span>
                 <span>{post.target_channel ?? "target не указан"}</span>
               </div>
@@ -288,6 +288,11 @@ function HistoryView() {
                   {post.publish_status === "published" && (
                     <div className="history-media">
                       <h3>Прикреплено к публикации</h3>
+                      {post.published_url && (
+                        <a className="published-link" href={post.published_url} target="_blank" rel="noreferrer">
+                          Открыть опубликованный пост
+                        </a>
+                      )}
                       {publishedMediaUrls.length ? (
                         <MediaPreview urls={publishedMediaUrls} />
                       ) : (
@@ -441,6 +446,18 @@ function PostEditor({
   const [includeOriginalMedia, setIncludeOriginalMedia] = useState(true);
   const [customMediaUrls, setCustomMediaUrls] = useState<string[]>([]);
   const [notice, setNotice] = useState<Notice>(idle);
+  const selectedMediaUrls = useMemo(
+    () => [
+      ...(includeOriginalMedia && post ? post.media_urls : []),
+      ...customMediaUrls
+    ],
+    [customMediaUrls, includeOriginalMedia, post]
+  );
+  const duplicatePublish =
+    Boolean(post && post.publish_status === "published") &&
+    sameChannel(post?.target_channel, targetChannel) &&
+    (post?.rewritten_text ?? "").trim() === text.trim() &&
+    sameStringList(post?.published_media_urls ?? [], selectedMediaUrls);
 
   useEffect(() => {
     setText(post?.rewritten_text ?? "");
@@ -466,12 +483,9 @@ function PostEditor({
     if (!post) return;
     setNotice({ kind: "loading", text: "Публикуем" });
     try {
-      const mediaUrls = [
-        ...(includeOriginalMedia ? post.media_urls : []),
-        ...customMediaUrls
-      ];
-      const updated = await api.publish(post.id, targetChannel, text, mediaUrls);
+      const updated = await api.publish(post.id, targetChannel, text, selectedMediaUrls);
       onUpdated(updated);
+      setText(updated.rewritten_text ?? text);
       setNotice({ kind: "success", text: "Опубликовано" });
     } catch (error) {
       setNotice({ kind: "error", text: errorMessage(error) });
@@ -549,10 +563,24 @@ function PostEditor({
             <textarea value={text} onChange={(event) => setText(event.target.value)} rows={9} />
           </label>
           {!targetChannel && <p className="hint">Введите канал для публикации, когда будете готовы публиковать.</p>}
-          <button disabled={!text.trim() || !targetChannel || notice.kind === "loading"} onClick={publish} type="button">
+          {duplicatePublish && (
+            <p className="hint">
+              Этот вариант уже опубликован. Измените текст, канал или изображения, чтобы опубликовать заново.
+            </p>
+          )}
+          <button
+            disabled={!text.trim() || !targetChannel || duplicatePublish || notice.kind === "loading"}
+            onClick={publish}
+            type="button"
+          >
             <Send size={18} /> Опубликовать
           </button>
           <StatusLine notice={notice} />
+          {post.published_url && (
+            <a className="published-link" href={post.published_url} target="_blank" rel="noreferrer">
+              Открыть опубликованный пост
+            </a>
+          )}
           {post.error_message && <p className="error-text">{post.error_message}</p>}
         </>
       ) : (
@@ -595,7 +623,13 @@ function StatusLine({ notice }: { notice: Notice }) {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Неизвестная ошибка";
+  if (!(error instanceof Error)) {
+    return "Неизвестная ошибка";
+  }
+  if (error.message === "duplicate_publish") {
+    return "Этот вариант уже опубликован. Измените текст, канал или изображения.";
+  }
+  return error.message;
 }
 
 function formatDate(value: string): string {
@@ -606,6 +640,32 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function canonicalChannel(value: string | null | undefined): string {
+  const raw = (value ?? "").trim();
+  const match = raw.match(/^(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)(?:\/\d+)?\/?$/i);
+  return (match ? match[1] : raw.replace(/^@/, "")).toLowerCase();
+}
+
+function sameChannel(left: string | null | undefined, right: string | null | undefined): boolean {
+  return canonicalChannel(left) === canonicalChannel(right);
+}
+
+function sameStringList(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function publishStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    fetched: "загружен",
+    rewritten: "переписан",
+    published: "опубликован",
+    rewrite_error: "ошибка рерайта",
+    publish_error: "ошибка публикации",
+    error: "ошибка"
+  };
+  return labels[status] ?? status;
 }
 
 async function refreshTelegramStatus(setTelegramStatus: (status: TelegramStatus) => void) {

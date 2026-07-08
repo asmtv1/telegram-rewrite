@@ -62,6 +62,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          APP_USERS: ${{ secrets.APP_USERS }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            SSH_PRIVATE_KEY \
+            SSH_USER \
+            POSTGRES_PASSWORD \
+            DATABASE_URL \
+            SESSION_SECRET \
+            APP_USERS \
+            TELEGRAM_API_ID \
+            TELEGRAM_API_HASH \
+            APP_ENCRYPTION_KEY
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required GitHub Secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Prepare SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -109,6 +141,11 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
           DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL || 'deepseek-v4-flash' }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          LLM_TIMEOUT_SECONDS: ${{ secrets.LLM_TIMEOUT_SECONDS || '45' }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
@@ -127,6 +164,11 @@ jobs:
           DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY
           DEEPSEEK_BASE_URL=$DEEPSEEK_BASE_URL
           DEEPSEEK_MODEL=$DEEPSEEK_MODEL
+          LLM_PROVIDER=$LLM_PROVIDER
+          LLM_API_KEY=$LLM_API_KEY
+          LLM_BASE_URL=$LLM_BASE_URL
+          LLM_MODEL=$LLM_MODEL
+          LLM_TIMEOUT_SECONDS=$LLM_TIMEOUT_SECONDS
 
           TELEGRAM_API_ID=$TELEGRAM_API_ID
           TELEGRAM_API_HASH=$TELEGRAM_API_HASH

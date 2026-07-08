@@ -520,8 +520,22 @@ button.tab:hover:not(.active) {
   gap: 10px;
 }
 
-.history-meta span:first-child {
+.status-badge {
+  color: #8b949e;
+}
+
+.status-badge.published {
   color: #56d364;
+}
+
+.status-badge.rewritten {
+  color: #8bb8e0;
+}
+
+.status-badge.rewrite_error,
+.status-badge.publish_error,
+.status-badge.error {
+  color: #f85149;
 }
 
 .history-grid {
@@ -550,6 +564,27 @@ button.tab:hover:not(.active) {
   display: grid;
   gap: 8px;
   margin-top: 14px;
+}
+
+.published-link {
+  align-items: center;
+  background: #173520;
+  border: 1px solid #2ea043;
+  border-radius: 8px;
+  color: #7ee787;
+  display: inline-flex;
+  font-size: 0.9rem;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 40px;
+  padding: 9px 12px;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.published-link:hover {
+  background: #1f462b;
+  color: #aff5b4;
 }
 
 .error-text {

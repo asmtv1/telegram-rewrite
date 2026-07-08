@@ -36,6 +36,7 @@ class TelegramStatusResponse(BaseModel):
 class PostResponse(BaseModel):
     id: int
     source_channel: str
+    source_channel_id: Optional[str] = None
     target_channel: Optional[str] = None
     telegram_message_id: int
     original_text: str
@@ -45,6 +46,8 @@ class PostResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     published_at: Optional[datetime] = None
+    published_message_id: Optional[int] = None
+    published_url: Optional[str] = None
     media_urls: List[str] = Field(default_factory=list)
     published_media_urls: Optional[List[str]] = None
 

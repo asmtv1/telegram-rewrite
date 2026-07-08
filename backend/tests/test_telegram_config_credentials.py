@@ -111,7 +111,7 @@ async def test_fetch_posts_requires_membership_before_reading_history(test_setti
 
         async def get_permissions(self, channel, user):
             self.permissions_checked = True
-            assert channel == "@source"
+            assert channel == "source"
             assert user == "me"
             raise UserNotParticipantError(None)
 
@@ -134,6 +134,7 @@ async def test_fetch_posts_requires_membership_before_reading_history(test_setti
         await service.fetch_text_posts(object(), "user1", "@source", None)
     except TelegramServiceError as exc:
         assert exc.code == "telegram_not_channel_member"
+        assert exc.status_code == 403
         assert "подпишитесь" in exc.message
     else:
         raise AssertionError("expected telegram_not_channel_member")
@@ -167,7 +168,7 @@ async def test_publish_checks_target_channel_posting_rights_before_sending(test_
 
         async def get_permissions(self, channel, user):
             self.permissions_checked = True
-            assert channel == "@target"
+            assert channel == "target"
             assert user == "me"
             return Permissions()
 
@@ -190,6 +191,7 @@ async def test_publish_checks_target_channel_posting_rights_before_sending(test_
         await service.publish(object(), "user1", "@target", "text")
     except TelegramServiceError as exc:
         assert exc.code == "telegram_publish_forbidden"
+        assert exc.status_code == 403
         assert "нет прав на публикацию" in exc.message
     else:
         raise AssertionError("expected telegram_publish_forbidden")

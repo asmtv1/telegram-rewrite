@@ -10,28 +10,125 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient
 from telethon.errors import (
+    AuthKeyError,
+    ChannelInvalidError,
     ChannelPrivateError,
     ChatAdminRequiredError,
+    ChatWriteForbiddenError,
     FloodWaitError,
     SessionPasswordNeededError,
+    UnauthorizedError,
     UserNotParticipantError,
+    UsernameInvalidError,
+    UsernameNotOccupiedError,
 )
 from telethon.tl.types import MessageMediaPhoto
+from telethon.utils import get_peer_id
 
 from app.config import Settings
 from app.models import TelegramCredentials, TelegramLoginState
 from app.models import utcnow
 
 
+TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_CAPTION_LIMIT = 1024
+
+_TME_C_RE = re.compile(r"(?:https?://)?t\.me/c/(\d+)(?:/\d+)?/?$", re.IGNORECASE)
+_TME_RE = re.compile(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)(?:/\d+)?/?$", re.IGNORECASE)
+
+
 class TelegramServiceError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, status_code: int = 400):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status_code = status_code
 
 
 class PasswordRequired(Exception):
     pass
+
+
+def normalize_channel(raw: str) -> str | int:
+    value = raw.strip()
+    match = _TME_C_RE.match(value)
+    if match:
+        return int(f"-100{match.group(1)}")
+    match = _TME_RE.match(value)
+    if match:
+        value = match.group(1)
+    value = value.lstrip("@").strip()
+    if not value:
+        raise TelegramServiceError("telegram_channel_not_found", "Укажите канал", status_code=404)
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    return value
+
+
+def canonical_channel_id(raw: str) -> str:
+    return str(normalize_channel(raw))
+
+
+def _fit_caption(text: str) -> str:
+    if len(text) <= TELEGRAM_CAPTION_LIMIT:
+        return text
+    head = text[:TELEGRAM_CAPTION_LIMIT]
+    cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), head.rfind("\n"))
+    if cut > TELEGRAM_CAPTION_LIMIT // 2:
+        return head[: cut + 1].strip()
+    return head.rstrip()
+
+
+def _split_text(text: str) -> list[str]:
+    return [text[i : i + TELEGRAM_TEXT_LIMIT] for i in range(0, len(text), TELEGRAM_TEXT_LIMIT)]
+
+
+def build_publish_parts(text: str, has_media: bool) -> list[tuple[str, str]]:
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if has_media:
+        return [("media", _fit_caption(cleaned))]
+    return [("text", chunk) for chunk in _split_text(cleaned)]
+
+
+def map_telegram_error(exc: Exception, channel: str | None = None) -> TelegramServiceError:
+    where = f" ({channel})" if channel else ""
+    if isinstance(exc, FloodWaitError):
+        return TelegramServiceError(
+            "telegram_flood_wait",
+            f"Telegram просит подождать {exc.seconds} сек и повторить запрос",
+            status_code=429,
+        )
+    if isinstance(exc, (UsernameNotOccupiedError, UsernameInvalidError, ChannelInvalidError, ValueError)):
+        return TelegramServiceError(
+            "telegram_channel_not_found",
+            f"Канал не найден{where}. Проверьте имя или ссылку",
+            status_code=404,
+        )
+    if isinstance(exc, (ChannelPrivateError, UserNotParticipantError)):
+        return TelegramServiceError(
+            "telegram_channel_access_denied",
+            f"Нет доступа к каналу{where}: аккаунт в нём не состоит",
+            status_code=403,
+        )
+    if isinstance(exc, (ChatWriteForbiddenError, ChatAdminRequiredError)):
+        return TelegramServiceError(
+            "telegram_publish_forbidden",
+            f"Нет прав на публикацию в канале{where}",
+            status_code=403,
+        )
+    if isinstance(exc, (AuthKeyError, UnauthorizedError)):
+        return TelegramServiceError(
+            "telegram_not_connected",
+            "Telegram-сессия не создана или недействительна. Подключите Telegram-аккаунт заново.",
+            status_code=503,
+        )
+    return TelegramServiceError(
+        "telegram_unexpected_error",
+        f"Неожиданная ошибка Telegram ({type(exc).__name__}). Подробности в логах сервера",
+        status_code=502,
+    )
 
 
 @dataclass(frozen=True)
@@ -53,6 +150,13 @@ class TextPage:
     items: list[TextPost]
     next_offset_id: int | None
     has_more: bool
+    source_channel_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    message_id: int | None
+    url: str | None
 
 
 async def collect_text_posts(
@@ -89,6 +193,35 @@ async def collect_text_posts(
         next_offset_id=items[-1].id if items else None,
         has_more=has_more,
     )
+
+
+def _first_message_id(sent) -> int | None:
+    if isinstance(sent, (list, tuple)):
+        for item in sent:
+            message_id = getattr(item, "id", None)
+            if message_id is not None:
+                return int(message_id)
+        return None
+    message_id = getattr(sent, "id", None)
+    return int(message_id) if message_id is not None else None
+
+
+def build_message_url(raw_channel: str, normalized_channel: str | int, message_id: int | None) -> str | None:
+    if message_id is None:
+        return None
+    c_match = _TME_C_RE.match(raw_channel.strip())
+    if c_match:
+        return f"https://t.me/c/{c_match.group(1)}/{message_id}"
+    if isinstance(normalized_channel, int):
+        value = str(normalized_channel)
+        if value.startswith("-100"):
+            return f"https://t.me/c/{value[4:]}/{message_id}"
+        return None
+    match = _TME_RE.match(raw_channel.strip())
+    slug = match.group(1) if match else raw_channel.strip().lstrip("@")
+    if not slug or re.fullmatch(r"-?\d+", slug):
+        return None
+    return f"https://t.me/{slug}/{message_id}"
 
 
 class TelegramService:
@@ -246,46 +379,59 @@ class TelegramService:
             await self._connect(client)
             if not await client.is_user_authorized():
                 raise TelegramServiceError("telegram_not_connected", "Telegram is not connected")
-            await self._ensure_channel_member(client, source_channel)
+            normalized_source_channel = normalize_channel(source_channel)
+            await self._ensure_channel_member(client, normalized_source_channel)
+            if hasattr(client, "get_entity"):
+                source_entity = await client.get_entity(normalized_source_channel)
+                source_channel_id = str(get_peer_id(source_entity))
+            else:
+                source_entity = normalized_source_channel
+                source_channel_id = canonical_channel_id(source_channel)
 
             async def raw_stream():
-                async for message in client.iter_messages(source_channel, offset_id=offset_id or 0):
-                    media_urls = await self._download_message_photos(client, user_id, source_channel, message)
+                async for message in client.iter_messages(source_entity, offset_id=offset_id or 0):
+                    media_urls = await self._download_message_photos(client, user_id, source_channel_id, message)
                     yield RawTelegramMessage(id=message.id, text=message.message, media_urls=media_urls)
 
-            return await collect_text_posts(raw_stream())
+            page = await collect_text_posts(raw_stream())
+            return TextPage(
+                items=page.items,
+                next_offset_id=page.next_offset_id,
+                has_more=page.has_more,
+                source_channel_id=source_channel_id,
+            )
         except TelegramServiceError:
             raise
-        except (ChannelPrivateError, ChatAdminRequiredError) as exc:
-            raise TelegramServiceError("telegram_channel_unavailable", str(exc)) from exc
-        except FloodWaitError as exc:
-            raise TelegramServiceError("telegram_flood_wait", f"Telegram rate limit: wait {exc.seconds}s") from exc
         except Exception as exc:
-            raise TelegramServiceError("telegram_fetch_failed", str(exc)) from exc
+            raise map_telegram_error(exc, source_channel) from exc
         finally:
             await self._disconnect(client)
 
-    async def _ensure_channel_member(self, client, source_channel: str) -> None:
+    async def _ensure_channel_member(self, client, source_channel: str | int) -> None:
         try:
             await client.get_permissions(source_channel, "me")
         except UserNotParticipantError as exc:
             raise TelegramServiceError(
                 "telegram_not_channel_member",
                 "Вы не состоите в этом Telegram-канале. Сначала подпишитесь на канал, затем повторите загрузку.",
+                status_code=403,
             ) from exc
 
     async def _ensure_can_publish(self, client, target_channel: str) -> None:
+        normalized_target_channel = normalize_channel(target_channel)
         try:
-            permissions = await client.get_permissions(target_channel, "me")
+            permissions = await client.get_permissions(normalized_target_channel, "me")
         except UserNotParticipantError as exc:
             raise TelegramServiceError(
                 "telegram_publish_forbidden",
                 "Вы не состоите в target-канале. Сначала добавьте аккаунт в канал и выдайте права на публикацию.",
+                status_code=403,
             ) from exc
         if not (getattr(permissions, "is_chat", False) or getattr(permissions, "post_messages", False)):
             raise TelegramServiceError(
                 "telegram_publish_forbidden",
                 "У пользователя нет прав на публикацию в target-канал. Сначала выдайте права на публикацию.",
+                status_code=403,
             )
 
     async def publish(
@@ -295,31 +441,39 @@ class TelegramService:
         target_channel: str,
         text: str,
         media_urls: list[str] | None = None,
-    ) -> None:
+    ) -> PublishResult:
         await self._require_credentials(session, user_id)
         client = self._app_client(user_id)
         try:
             await self._connect(client)
             if not await client.is_user_authorized():
-                raise TelegramServiceError("telegram_not_connected", "Telegram is not connected")
+                raise TelegramServiceError("telegram_not_connected", "Telegram is not connected", status_code=503)
             await self._ensure_can_publish(client, target_channel)
             media_paths = [
                 str(path)
                 for url in media_urls or []
                 if (path := self._media_path_for_url(url)) is not None and path.exists()
             ]
-            if media_paths:
-                await client.send_file(target_channel, media_paths, caption=text)
-            else:
-                await client.send_message(target_channel, text)
+            normalized_target_channel = normalize_channel(target_channel)
+            parts = build_publish_parts(text, has_media=bool(media_paths))
+            if not parts:
+                raise TelegramServiceError("telegram_empty_message", "Текст публикации пуст", status_code=422)
+            published_message_id = None
+            for kind, chunk in parts:
+                if kind == "media":
+                    sent = await client.send_file(normalized_target_channel, media_paths, caption=chunk, parse_mode=None)
+                else:
+                    sent = await client.send_message(normalized_target_channel, chunk, parse_mode=None)
+                if published_message_id is None:
+                    published_message_id = _first_message_id(sent)
+            return PublishResult(
+                message_id=published_message_id,
+                url=build_message_url(target_channel, normalized_target_channel, published_message_id),
+            )
         except TelegramServiceError:
             raise
-        except ChatAdminRequiredError as exc:
-            raise TelegramServiceError("telegram_publish_forbidden", str(exc)) from exc
-        except FloodWaitError as exc:
-            raise TelegramServiceError("telegram_flood_wait", f"Telegram rate limit: wait {exc.seconds}s") from exc
         except Exception as exc:
-            raise TelegramServiceError("telegram_publish_failed", str(exc)) from exc
+            raise map_telegram_error(exc, target_channel) from exc
         finally:
             await self._disconnect(client)
 
@@ -328,7 +482,7 @@ class TelegramService:
             select(TelegramCredentials).where(TelegramCredentials.user_id == user_id)
         )
         if credentials is None:
-            raise TelegramServiceError("telegram_not_connected", "Telegram is not connected")
+            raise TelegramServiceError("telegram_not_connected", "Telegram is not connected", status_code=503)
         return credentials
 
     def _app_client(self, user_id: str) -> TelegramClient:
@@ -336,6 +490,7 @@ class TelegramService:
             raise TelegramServiceError(
                 "telegram_app_credentials_missing",
                 "Telegram API ID/API hash are not configured",
+                status_code=503,
             )
         return self._client(
             user_id,
@@ -368,5 +523,6 @@ class FakeTelegramService:
     async def fetch_text_posts(self, session, user_id, source_channel, offset_id) -> TextPage:
         return self.pages.get(source_channel, TextPage(items=[], next_offset_id=None, has_more=False))
 
-    async def publish(self, session, user_id, target_channel, text, media_urls=None) -> None:
+    async def publish(self, session, user_id, target_channel, text, media_urls=None) -> PublishResult:
         self.published.append((user_id, target_channel, text, media_urls or []))
+        return PublishResult(message_id=None, url=None)

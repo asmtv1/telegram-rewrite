@@ -11,6 +11,7 @@ export type TelegramStatus = {
 export type PostItem = {
   id: number;
   source_channel: string;
+  source_channel_id: string | null;
   target_channel: string | null;
   telegram_message_id: number;
   original_text: string;
@@ -20,6 +21,8 @@ export type PostItem = {
   created_at: string;
   updated_at: string;
   published_at: string | null;
+  published_message_id: number | null;
+  published_url: string | null;
   media_urls: string[];
   published_media_urls: string[] | null;
 };

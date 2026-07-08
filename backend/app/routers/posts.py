@@ -13,7 +13,8 @@ from app.db import get_db
 from app.dependencies import current_user_id
 from app.models import Post, utcnow
 from app.schemas import MediaUploadResponse, PostResponse, PostsHistoryResponse, PostsPageResponse, PublishRequest, RewriteRequest
-from app.services.telegram import TelegramServiceError
+from app.services.deepseek import RewriteServiceError, strip_channel_references
+from app.services.telegram import TelegramServiceError, canonical_channel_id
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 
@@ -57,6 +58,37 @@ def _publish_media_urls(request: Request, post: Post, user_id: str, requested_ur
     return requested_urls
 
 
+def _post_matches_source_channel_id(post: Post, source_channel_id: str) -> bool:
+    if post.source_channel_id:
+        return post.source_channel_id == source_channel_id
+    try:
+        return canonical_channel_id(post.source_channel) == source_channel_id
+    except TelegramServiceError:
+        return False
+
+
+def _same_channel(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return left == right
+    try:
+        return canonical_channel_id(left) == canonical_channel_id(right)
+    except TelegramServiceError:
+        return left.strip() == right.strip()
+
+
+def _same_media(left: list[str] | None, right: list[str] | None) -> bool:
+    return (left or []) == (right or [])
+
+
+def _is_duplicate_publish(post: Post, target_channel: str, text: str, media_urls: list[str]) -> bool:
+    return (
+        post.publish_status == "published"
+        and _same_channel(post.target_channel, target_channel)
+        and (post.rewritten_text or "").strip() == text.strip()
+        and _same_media(post.published_media_urls, media_urls)
+    )
+
+
 @router.get("/history", response_model=PostsHistoryResponse)
 async def history_posts(
     user_id: str = Depends(current_user_id),
@@ -68,7 +100,7 @@ async def history_posts(
             Post.user_id == user_id,
             or_(
                 Post.rewritten_text.is_not(None),
-                Post.publish_status.in_(["rewritten", "published", "error"]),
+                Post.publish_status.in_(["rewritten", "published", "error", "rewrite_error", "publish_error"]),
             ),
         )
         .order_by(desc(Post.updated_at))
@@ -93,21 +125,23 @@ async def list_posts(
             offset_id,
         )
     except TelegramServiceError as exc:
-        raise HTTPException(status_code=400, detail=exc.message) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
     items: list[Post] = []
+    source_channel_id = page.source_channel_id or canonical_channel_id(source_channel)
     for item in page.items:
-        existing = await session.scalar(
-            select(Post).where(
-                Post.user_id == user_id,
-                Post.source_channel == source_channel,
-                Post.telegram_message_id == item.id,
-            )
+        candidates = await session.scalars(
+            select(Post).where(Post.user_id == user_id, Post.telegram_message_id == item.id)
+        )
+        existing = next(
+            (post for post in candidates.all() if _post_matches_source_channel_id(post, source_channel_id)),
+            None,
         )
         if existing is None:
             existing = Post(
                 user_id=user_id,
                 source_channel=source_channel,
+                source_channel_id=source_channel_id,
                 target_channel=target_channel,
                 telegram_message_id=item.id,
                 original_text=item.text,
@@ -116,6 +150,8 @@ async def list_posts(
             )
             session.add(existing)
         else:
+            existing.source_channel = source_channel
+            existing.source_channel_id = source_channel_id
             existing.target_channel = target_channel
             existing.original_text = item.text
             existing.media_urls = item.media_urls or []
@@ -149,9 +185,16 @@ async def rewrite_post(
         )
         post.publish_status = "rewritten"
         post.error_message = None
+    except RewriteServiceError as exc:
+        post.publish_status = "rewrite_error"
+        post.error_message = exc.message
+        await session.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     except Exception as exc:
-        post.publish_status = "error"
+        post.publish_status = "rewrite_error"
         post.error_message = str(exc)
+        await session.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await session.commit()
     await session.refresh(post)
     return PostResponse.model_validate(post)
@@ -196,14 +239,16 @@ async def publish_post(
     session: AsyncSession = Depends(get_db),
 ):
     post = await _get_owned_post(session, user_id, post_id)
-    text = payload.text.strip()
+    text = strip_channel_references(payload.text)
     if not text:
         raise HTTPException(status_code=422, detail="text_required")
+    media_urls = _publish_media_urls(request, post, user_id, payload.media_urls)
+    if _is_duplicate_publish(post, payload.target_channel, text, media_urls):
+        raise HTTPException(status_code=409, detail="duplicate_publish")
     post.target_channel = payload.target_channel
     post.rewritten_text = text
-    media_urls = _publish_media_urls(request, post, user_id, payload.media_urls)
     try:
-        await request.app.state.telegram_service.publish(
+        publish_result = await request.app.state.telegram_service.publish(
             session,
             user_id,
             payload.target_channel,
@@ -213,10 +258,19 @@ async def publish_post(
         post.publish_status = "published"
         post.published_media_urls = media_urls
         post.published_at = utcnow()
+        post.published_message_id = getattr(publish_result, "message_id", None)
+        post.published_url = getattr(publish_result, "url", None)
         post.error_message = None
     except TelegramServiceError as exc:
-        post.publish_status = "error"
+        post.publish_status = "publish_error"
         post.error_message = exc.message
+        await session.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except Exception as exc:
+        post.publish_status = "publish_error"
+        post.error_message = str(exc)
+        await session.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await session.commit()
     await session.refresh(post)
     return PostResponse.model_validate(post)

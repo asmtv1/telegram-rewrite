@@ -108,6 +108,44 @@ def test_posts_fetch_returns_media_urls(app, client):
     assert response.json()["items"][0]["media_urls"] == ["/media/posts/user1/source/12.jpg"]
 
 
+def test_posts_fetch_deduplicates_same_channel_by_canonical_id(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+    from app.services.telegram import TextPage, TextPost
+    from sqlalchemy import select
+
+    class CanonicalTelegramService:
+        async def fetch_text_posts(self, session, user_id, source_channel, offset_id):
+            return TextPage(
+                items=[TextPost(id=77, text=f"text from {source_channel}")],
+                next_offset_id=77,
+                has_more=False,
+                source_channel_id="-100123456",
+            )
+
+    app.state.telegram_service = CanonicalTelegramService()
+    login(client, "user1", "12345")
+
+    first_response = client.get("/api/posts?source_channel=@source")
+    second_response = client.get("/api/posts?source_channel=https://t.me/source")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["items"][0]["id"] == second_response.json()["items"][0]["id"]
+    assert second_response.json()["items"][0]["source_channel_id"] == "-100123456"
+
+    async def count_posts():
+        session_maker = get_session_maker(app)
+        async with session_maker() as session:
+            return list(await session.scalars(select(Post)))
+
+    import anyio
+
+    posts = anyio.run(count_posts)
+    assert len(posts) == 1
+    assert posts[0].source_channel_id == "-100123456"
+
+
 @pytest.mark.asyncio
 async def test_publish_passes_post_media_urls_to_telegram_service(app, client):
     from app.db import get_session_maker
@@ -372,3 +410,195 @@ async def test_publish_sets_published_at_and_returns_timestamps(app, client):
     assert payload["publish_status"] == "published"
     assert payload["published_at"]
     assert payload["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_publish_returns_and_persists_published_message_link(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+
+    post_id = await insert_post(app, "user1")
+
+    class PublishResult:
+        message_id = 777
+        url = "https://t.me/target/777"
+
+    class PublishTelegramService:
+        async def publish(self, session, user_id, target_channel, text, media_urls):
+            return PublishResult()
+
+    app.state.telegram_service = PublishTelegramService()
+    login(client, "user1", "12345")
+
+    response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["published_message_id"] == 777
+    assert payload["published_url"] == "https://t.me/target/777"
+
+    session_maker = get_session_maker(app)
+    async with session_maker() as session:
+        post = await session.get(Post, post_id)
+        assert post.published_message_id == 777
+        assert post.published_url == "https://t.me/target/777"
+
+    history_response = client.get("/api/posts/history")
+
+    assert history_response.status_code == 200
+    assert history_response.json()["items"][0]["published_url"] == "https://t.me/target/777"
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_duplicate_payload_without_sending_again(app, client):
+    post_id = await insert_post(app, "user1")
+
+    class PublishTelegramService:
+        def __init__(self):
+            self.calls = 0
+
+        async def publish(self, session, user_id, target_channel, text, media_urls):
+            self.calls += 1
+            return None
+
+    service = PublishTelegramService()
+    app.state.telegram_service = service
+    login(client, "user1", "12345")
+
+    first_response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit", "media_urls": []},
+    )
+    second_response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "https://t.me/target", "text": "manual edit", "media_urls": []},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "duplicate_publish"
+    assert service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_allows_changed_payload_after_previous_publish(app, client):
+    post_id = await insert_post(app, "user1")
+
+    class PublishTelegramService:
+        def __init__(self):
+            self.calls = []
+
+        async def publish(self, session, user_id, target_channel, text, media_urls):
+            self.calls.append((target_channel, text, media_urls))
+            return None
+
+    service = PublishTelegramService()
+    app.state.telegram_service = service
+    login(client, "user1", "12345")
+
+    first_response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit", "media_urls": []},
+    )
+    second_response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit updated", "media_urls": []},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert service.calls == [
+        ("@target", "manual edit", []),
+        ("@target", "manual edit updated", []),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_telegram_error_sets_publish_error_status(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+    from app.services.telegram import TelegramServiceError
+
+    post_id = await insert_post(app, "user1")
+
+    class BrokenTelegramService:
+        async def publish(self, session, user_id, target_channel, text, media_urls):
+            raise TelegramServiceError("telegram_publish_forbidden", "Нет прав на публикацию", status_code=403)
+
+    app.state.telegram_service = BrokenTelegramService()
+    login(client, "user1", "12345")
+
+    response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit", "media_urls": []},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Нет прав на публикацию"
+
+    session_maker = get_session_maker(app)
+    async with session_maker() as session:
+        post = await session.get(Post, post_id)
+        assert post.publish_status == "publish_error"
+        assert post.error_message == "Нет прав на публикацию"
+        assert post.target_channel == "@target"
+        assert post.rewritten_text == "manual edit"
+
+
+@pytest.mark.asyncio
+async def test_publish_unexpected_error_sets_publish_error_status_and_bad_gateway(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+
+    post_id = await insert_post(app, "user1")
+
+    class BrokenTelegramService:
+        async def publish(self, session, user_id, target_channel, text, media_urls):
+            raise RuntimeError("socket closed")
+
+    app.state.telegram_service = BrokenTelegramService()
+    login(client, "user1", "12345")
+
+    response = client.post(
+        f"/api/posts/{post_id}/publish",
+        json={"target_channel": "@target", "text": "manual edit", "media_urls": []},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "socket closed"
+
+    session_maker = get_session_maker(app)
+    async with session_maker() as session:
+        post = await session.get(Post, post_id)
+        assert post.publish_status == "publish_error"
+        assert post.error_message == "socket closed"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_error_returns_bad_gateway_and_persists_error(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+    from app.services.deepseek import RewriteServiceError
+
+    post_id = await insert_post(app, "user1")
+
+    class BrokenRewriteService:
+        async def rewrite(self, original_text, prompt):
+            raise RewriteServiceError("llm_unavailable", "LLM provider is unavailable")
+
+    app.state.rewrite_service = BrokenRewriteService()
+    login(client, "user1", "12345")
+
+    response = client.post(f"/api/posts/{post_id}/rewrite", json={"prompt": "rewrite"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "LLM provider is unavailable"
+
+    session_maker = get_session_maker(app)
+    async with session_maker() as session:
+        post = await session.get(Post, post_id)
+        assert post.publish_status == "rewrite_error"
+        assert post.error_message == "LLM provider is unavailable"

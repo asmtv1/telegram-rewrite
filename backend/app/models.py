@@ -33,11 +33,18 @@ class Post(TimestampMixin, Base):
             "telegram_message_id",
             name="uq_posts_user_source_message",
         ),
+        UniqueConstraint(
+            "user_id",
+            "source_channel_id",
+            "telegram_message_id",
+            name="uq_posts_user_source_id_message",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     source_channel: Mapped[str] = mapped_column(String(255), index=True)
+    source_channel_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     target_channel: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     telegram_message_id: Mapped[int] = mapped_column(Integer)
     original_text: Mapped[str] = mapped_column(Text)
@@ -45,6 +52,8 @@ class Post(TimestampMixin, Base):
     publish_status: Mapped[str] = mapped_column(String(32), default="fetched")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    published_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     media_urls: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     published_media_urls: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
 
