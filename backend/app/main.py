@@ -36,7 +36,7 @@ def create_app(
         SessionMiddleware,
         secret_key=app_settings.session_secret,
         same_site="lax",
-        https_only=False,
+        https_only=app_settings.session_cookie_secure,
     )
     app.state.settings = app_settings
     app.state.session_maker = session_maker

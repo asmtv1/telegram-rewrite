@@ -1,6 +1,15 @@
 import pytest
+from sqlalchemy import event
 
 from conftest import login
+
+
+PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+    b"\x89\x00\x00\x00\rIDATx\x9cc\x00\x01\x00\x00\x05\x00"
+    b"\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 async def insert_post(app, user_id: str) -> int:
@@ -264,7 +273,7 @@ async def test_upload_custom_media_can_be_published_with_original_media(app, cli
 
     upload_response = client.post(
         f"/api/posts/{post_id}/media",
-        files=[("files", ("custom.jpg", b"image-bytes", "image/jpeg"))],
+        files=[("files", ("custom.png", PNG_BYTES, "image/png"))],
     )
 
     assert upload_response.status_code == 200
@@ -285,6 +294,95 @@ async def test_upload_custom_media_can_be_published_with_original_media(app, cli
     assert service.calls == [
         ("user1", "@target", "manual edit", ["/media/posts/user1/source/303.jpg", uploaded_urls[0]])
     ]
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_file_that_only_claims_image_content_type(app, client):
+    post_id = await insert_post(app, "user1")
+    login(client, "user1", "12345")
+
+    response = client.post(
+        f"/api/posts/{post_id}/media",
+        files=[("files", ("fake.jpg", b"not really an image", "image/jpeg"))],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid_image_file"
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_images_over_configured_size_limit(app, client):
+    post_id = await insert_post(app, "user1")
+    app.state.settings.media_upload_max_bytes = len(PNG_BYTES) - 1
+    login(client, "user1", "12345")
+
+    response = client.post(
+        f"/api/posts/{post_id}/media",
+        files=[("files", ("custom.png", PNG_BYTES, "image/png"))],
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "image_file_too_large"
+
+
+@pytest.mark.asyncio
+async def test_list_posts_fetches_existing_posts_with_one_lookup_query(app, client):
+    from app.db import get_session_maker
+    from app.models import Post
+    from app.services.telegram import TextPage, TextPost
+
+    class ManyItemsTelegramService:
+        async def fetch_text_posts(self, session, user_id, source_channel, offset_id):
+            return TextPage(
+                items=[
+                    TextPost(id=501, text="existing"),
+                    TextPost(id=502, text="new"),
+                    TextPost(id=503, text="also new"),
+                ],
+                next_offset_id=503,
+                has_more=False,
+                source_channel_id="-100501",
+            )
+
+    session_maker = get_session_maker(app)
+    async with session_maker() as session:
+        session.add(
+            Post(
+                user_id="user1",
+                source_channel="@source",
+                source_channel_id="-100501",
+                target_channel="@target",
+                telegram_message_id=501,
+                original_text="old text",
+                publish_status="fetched",
+            )
+        )
+        await session.commit()
+
+    lookup_queries = 0
+
+    def count_post_lookup(conn, cursor, statement, parameters, context, executemany):
+        nonlocal lookup_queries
+        if (
+            "FROM posts" in statement
+            and "telegram_message_id" in statement
+            and "IN" in statement
+        ):
+            lookup_queries += 1
+
+    bind = session_maker.kw["bind"].sync_engine
+    event.listen(bind, "before_cursor_execute", count_post_lookup)
+    try:
+        app.state.telegram_service = ManyItemsTelegramService()
+        login(client, "user1", "12345")
+
+        response = client.get("/api/posts?source_channel=@source&target_channel=@target")
+    finally:
+        event.remove(bind, "before_cursor_execute", count_post_lookup)
+
+    assert response.status_code == 200
+    assert lookup_queries == 1
+    assert [item["telegram_message_id"] for item in response.json()["items"]] == [501, 502, 503]
 
 
 @pytest.mark.asyncio

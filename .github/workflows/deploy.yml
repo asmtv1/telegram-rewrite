@@ -159,6 +159,7 @@ jobs:
 
           DATABASE_URL=$DATABASE_URL
           SESSION_SECRET=$SESSION_SECRET
+          SESSION_COOKIE_SECURE=true
           APP_USERS=$APP_USERS
 
           DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY
@@ -176,6 +177,7 @@ jobs:
           TELEGRAM_SESSIONS_DIR=/app/sessions
           MEDIA_DIR=/app/media
           MEDIA_URL_PREFIX=/media
+          MEDIA_UPLOAD_MAX_BYTES=10485760
           ENVEOF
 
           scp -i ~/.ssh/deploy_key -P "$SSH_PORT" /tmp/testovoe3.env "$SSH_USER@$DEPLOY_HOST:/tmp/testovoe3.env"

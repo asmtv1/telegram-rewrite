@@ -18,6 +18,16 @@ from app.services.telegram import TelegramServiceError, canonical_channel_id
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+IMAGE_SIGNATURE_SUFFIXES = (
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"RIFF", ".webp"),
+)
+
 
 async def _get_owned_post(session: AsyncSession, user_id: str, post_id: int) -> Post:
     post = await session.scalar(select(Post).where(Post.id == post_id, Post.user_id == user_id))
@@ -35,6 +45,50 @@ def _media_url_for_path(request: Request, path: Path) -> str:
     settings = request.app.state.settings
     relative = path.relative_to(Path(settings.media_dir))
     return f"{settings.media_url_prefix.rstrip('/')}/{relative.as_posix()}"
+
+
+def _image_suffix_from_magic(data: bytes) -> str | None:
+    for signature, suffix in IMAGE_SIGNATURE_SUFFIXES:
+        if data.startswith(signature):
+            if suffix == ".webp" and data[8:12] != b"WEBP":
+                return None
+            return suffix
+    return None
+
+
+def _safe_upload_suffix(upload: UploadFile, detected_suffix: str) -> str:
+    suffix = Path(upload.filename or "").suffix.lower()
+    if not suffix:
+        return detected_suffix
+    if suffix not in ALLOWED_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=422, detail="invalid_image_extension")
+    return detected_suffix
+
+
+async def _write_validated_image_upload(upload: UploadFile, path: Path, max_bytes: int) -> None:
+    first_chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+    detected_suffix = _image_suffix_from_magic(first_chunk)
+    if detected_suffix is None:
+        raise HTTPException(status_code=422, detail="invalid_image_file")
+
+    total_bytes = len(first_chunk)
+    if total_bytes > max_bytes:
+        raise HTTPException(status_code=413, detail="image_file_too_large")
+
+    try:
+        with path.open("wb") as output:
+            output.write(first_chunk)
+            while True:
+                chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise HTTPException(status_code=413, detail="image_file_too_large")
+                output.write(chunk)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _uploaded_media_prefix(request: Request, user_id: str) -> str:
@@ -129,12 +183,22 @@ async def list_posts(
 
     items: list[Post] = []
     source_channel_id = page.source_channel_id or canonical_channel_id(source_channel)
-    for item in page.items:
-        candidates = await session.scalars(
-            select(Post).where(Post.user_id == user_id, Post.telegram_message_id == item.id)
+    item_ids = [item.id for item in page.items]
+    existing_by_message_id: dict[int, list[Post]] = {}
+    if item_ids:
+        existing_posts = await session.scalars(
+            select(Post).where(Post.user_id == user_id, Post.telegram_message_id.in_(item_ids))
         )
+        for post in existing_posts.all():
+            existing_by_message_id.setdefault(post.telegram_message_id, []).append(post)
+
+    for item in page.items:
         existing = next(
-            (post for post in candidates.all() if _post_matches_source_channel_id(post, source_channel_id)),
+            (
+                post
+                for post in existing_by_message_id.get(item.id, [])
+                if _post_matches_source_channel_id(post, source_channel_id)
+            ),
             None,
         )
         if existing is None:
@@ -222,9 +286,14 @@ async def upload_post_media(
     for upload in files:
         if not (upload.content_type or "").startswith("image/"):
             raise HTTPException(status_code=422, detail="image_files_only")
-        suffix = Path(upload.filename or "").suffix.lower()[:16] or ".jpg"
+        first_chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+        detected_suffix = _image_suffix_from_magic(first_chunk)
+        if detected_suffix is None:
+            raise HTTPException(status_code=422, detail="invalid_image_file")
+        suffix = _safe_upload_suffix(upload, detected_suffix)
         path = directory / f"{uuid4().hex}{suffix}"
-        path.write_bytes(await upload.read())
+        await upload.seek(0)
+        await _write_validated_image_upload(upload, path, settings.media_upload_max_bytes)
         media_urls.append(_media_url_for_path(request, path))
 
     return MediaUploadResponse(media_urls=media_urls)

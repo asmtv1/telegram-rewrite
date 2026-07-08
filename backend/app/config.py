@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://testovoe3:testovoe3@postgres:5432/testovoe3"
     session_secret: str
+    session_cookie_secure: bool = False
     app_users: str = "user1:12345,user2:2407041"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
     telegram_sessions_dir: str = "/app/sessions"
     media_dir: str = "/app/media"
     media_url_prefix: str = "/media"
+    media_upload_max_bytes: int = 10 * 1024 * 1024
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
