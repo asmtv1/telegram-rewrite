@@ -13,6 +13,7 @@ import {
   X
 } from "lucide-react";
 import { api, PostItem, TelegramStatus } from "./api";
+import { isPublishedDraft, nextDraftsForTextChange, type DraftTextByPostId } from "./postEditorState";
 import {
   beginExclusiveRequest,
   finishExclusiveRequest,
@@ -523,6 +524,7 @@ function PostEditor({
   const [text, setText] = useState("");
   const [includeOriginalMedia, setIncludeOriginalMedia] = useState(true);
   const [customMediaUrls, setCustomMediaUrls] = useState<string[]>([]);
+  const [draftTexts, setDraftTexts] = useState<DraftTextByPostId>({});
   const [notice, setNotice] = useState<Notice>(idle);
   const selectedMediaUrls = useMemo(
     () => [
@@ -531,18 +533,30 @@ function PostEditor({
     ],
     [customMediaUrls, includeOriginalMedia, post]
   );
-  const duplicatePublish =
-    Boolean(post && post.publish_status === "published") &&
-    sameChannel(post?.target_channel, targetChannel) &&
-    (post?.rewritten_text ?? "").trim() === text.trim() &&
-    sameStringList(post?.published_media_urls ?? [], selectedMediaUrls);
+  const currentDraftPublished = isPublishedDraft(post, targetChannel, text, selectedMediaUrls);
+  const duplicatePublish = currentDraftPublished;
 
   useEffect(() => {
-    setText(post?.rewritten_text ?? "");
+    setText(post ? draftTexts[post.id] ?? post.rewritten_text ?? "" : "");
     setIncludeOriginalMedia(Boolean(post?.media_urls.length));
     setCustomMediaUrls([]);
     setNotice(idle);
   }, [post?.id]);
+
+  function clearDraft(postId: number) {
+    setDraftTexts((current) => {
+      const { [postId]: _removed, ...rest } = current;
+      return rest;
+    });
+  }
+
+  function changeResult(value: string) {
+    setText(value);
+    setNotice(idle);
+    if (post) {
+      setDraftTexts((current) => nextDraftsForTextChange(current, post, value));
+    }
+  }
 
   async function rewrite() {
     if (!post) return;
@@ -551,6 +565,7 @@ function PostEditor({
       const updated = await api.rewrite(post.id, prompt);
       onUpdated(updated);
       setText(updated.rewritten_text ?? "");
+      clearDraft(post.id);
       setNotice({ kind: "success", text: "Готово" });
     } catch (error) {
       setNotice({ kind: "error", text: errorMessage(error) });
@@ -564,6 +579,7 @@ function PostEditor({
       const updated = await api.publish(post.id, targetChannel, text, selectedMediaUrls);
       onUpdated(updated);
       setText(updated.rewritten_text ?? text);
+      clearDraft(post.id);
       setNotice({ kind: "success", text: "Опубликовано" });
     } catch (error) {
       setNotice({ kind: "error", text: errorMessage(error) });
@@ -638,7 +654,7 @@ function PostEditor({
           </button>
           <label>
             Результат
-            <textarea value={text} onChange={(event) => setText(event.target.value)} rows={9} />
+            <textarea value={text} onChange={(event) => changeResult(event.target.value)} rows={9} />
           </label>
           {!targetChannel && <p className="hint">Введите канал для публикации, когда будете готовы публиковать.</p>}
           {duplicatePublish && (
@@ -654,7 +670,7 @@ function PostEditor({
             <Send size={18} /> Опубликовать
           </button>
           <StatusLine notice={notice} />
-          {post.published_url && (
+          {currentDraftPublished && post.published_url && (
             <a className="published-link" href={post.published_url} target="_blank" rel="noreferrer">
               Открыть опубликованный пост
             </a>
@@ -722,20 +738,6 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
-}
-
-function canonicalChannel(value: string | null | undefined): string {
-  const raw = (value ?? "").trim();
-  const match = raw.match(/^(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)(?:\/\d+)?\/?$/i);
-  return (match ? match[1] : raw.replace(/^@/, "")).toLowerCase();
-}
-
-function sameChannel(left: string | null | undefined, right: string | null | undefined): boolean {
-  return canonicalChannel(left) === canonicalChannel(right);
-}
-
-function sameStringList(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function publishStatusLabel(status: string): string {
