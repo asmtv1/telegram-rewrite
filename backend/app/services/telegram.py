@@ -206,6 +206,19 @@ def _first_message_id(sent) -> int | None:
     return int(message_id) if message_id is not None else None
 
 
+def _combine_grouped_messages(messages: list[RawTelegramMessage]) -> RawTelegramMessage:
+    text_message = next((message for message in messages if (message.text or "").strip()), messages[-1])
+    media_urls: list[str] = []
+    seen_media_urls: set[str] = set()
+    for message in sorted(messages, key=lambda item: item.id):
+        for url in message.media_urls or []:
+            if url in seen_media_urls:
+                continue
+            seen_media_urls.add(url)
+            media_urls.append(url)
+    return RawTelegramMessage(id=text_message.id, text=text_message.text, media_urls=media_urls)
+
+
 def build_message_url(raw_channel: str, normalized_channel: str | int, message_id: int | None) -> str | None:
     if message_id is None:
         return None
@@ -401,9 +414,42 @@ class TelegramService:
                 source_channel_id = canonical_channel_id(source_channel)
 
             async def raw_stream():
+                grouped_id = None
+                grouped_messages: list[RawTelegramMessage] = []
+
+                async def flush_grouped():
+                    nonlocal grouped_id, grouped_messages
+                    if not grouped_messages:
+                        return None
+                    raw_message = _combine_grouped_messages(grouped_messages)
+                    grouped_id = None
+                    grouped_messages = []
+                    return raw_message
+
                 async for message in client.iter_messages(source_entity, offset_id=offset_id or 0):
                     media_urls = await self._download_message_photos(client, user_id, source_channel_id, message)
-                    yield RawTelegramMessage(id=message.id, text=message.message, media_urls=media_urls)
+                    message_grouped_id = getattr(message, "grouped_id", None)
+                    raw_message = RawTelegramMessage(id=message.id, text=message.message, media_urls=media_urls)
+                    if message_grouped_id is not None:
+                        if grouped_id is None:
+                            grouped_id = message_grouped_id
+                        if grouped_id == message_grouped_id:
+                            grouped_messages.append(raw_message)
+                            continue
+                        combined = await flush_grouped()
+                        if combined is not None:
+                            yield combined
+                        grouped_id = message_grouped_id
+                        grouped_messages.append(raw_message)
+                        continue
+                    combined = await flush_grouped()
+                    if combined is not None:
+                        yield combined
+                    yield raw_message
+
+                combined = await flush_grouped()
+                if combined is not None:
+                    yield combined
 
             page = await collect_text_posts(raw_stream())
             return TextPage(

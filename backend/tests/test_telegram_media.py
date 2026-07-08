@@ -56,3 +56,61 @@ async def test_download_message_photos_reuses_existing_file(tmp_path, monkeypatc
     assert await service._download_message_photos(FakeClient(), "user1", "-100123", FakePhotoMessage()) == [
         "/media/posts/user1/-100123/42.jpg"
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_text_posts_combines_all_photos_from_grouped_post(tmp_path, test_settings, monkeypatch):
+    from app.models import TelegramCredentials
+    from app.services.telegram import TelegramService
+
+    monkeypatch.setattr("app.services.telegram.MessageMediaPhoto", object)
+
+    class FakePhotoMessage:
+        def __init__(self, message_id, text):
+            self.id = message_id
+            self.message = text
+            self.media = object()
+            self.grouped_id = 9001
+
+    class FakeClient:
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_permissions(self, channel, user):
+            return object()
+
+        async def download_media(self, message, file):
+            path = f"{file}.jpg"
+            with open(path, "wb") as media_file:
+                media_file.write(b"image")
+            return path
+
+        async def iter_messages(self, *args, **kwargs):
+            yield FakePhotoMessage(102, "")
+            yield FakePhotoMessage(101, "caption")
+
+    client = FakeClient()
+
+    class TestTelegramService(TelegramService):
+        def _app_client(self, user_id):
+            return client
+
+        async def _require_credentials(self, session, user_id):
+            return TelegramCredentials(user_id=user_id, phone="+79990000000")
+
+    service = TestTelegramService(test_settings)
+
+    page = await service.fetch_text_posts(object(), "user1", "@source", None)
+
+    assert len(page.items) == 1
+    assert page.items[0].text == "caption"
+    assert page.items[0].media_urls == [
+        "/media/posts/user1/source/101.jpg",
+        "/media/posts/user1/source/102.jpg",
+    ]
