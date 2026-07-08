@@ -86,11 +86,11 @@ export const api = {
       body: JSON.stringify({ password })
     }),
   telegramLogout: () => request<{ ok: boolean }>("/api/telegram/logout", { method: "POST" }),
-  posts: (source_channel: string, target_channel?: string, offset_id?: number | null) => {
+  posts: (source_channel: string, target_channel?: string, offset_id?: number | null, signal?: AbortSignal) => {
     const params = new URLSearchParams({ source_channel });
     if (target_channel?.trim()) params.set("target_channel", target_channel);
     if (offset_id) params.set("offset_id", String(offset_id));
-    return request<PostsPage>(`/api/posts?${params.toString()}`);
+    return request<PostsPage>(`/api/posts?${params.toString()}`, { signal });
   },
   history: () => request<PostsHistory>("/api/posts/history"),
   rewrite: (postId: number, prompt: string) =>

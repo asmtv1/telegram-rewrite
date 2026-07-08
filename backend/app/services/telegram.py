@@ -251,6 +251,15 @@ class TelegramService:
         relative = url[len(prefix) + 1 :]
         return Path(self._settings.media_dir) / relative
 
+    def _existing_message_photo(self, directory: Path, message_id: int) -> Path | None:
+        exact_path = directory / str(message_id)
+        if exact_path.is_file() and exact_path.stat().st_size > 0:
+            return exact_path
+        for path in sorted(directory.glob(f"{message_id}.*")):
+            if path.is_file() and path.stat().st_size > 0:
+                return path
+        return None
+
     async def _download_message_photos(self, client, user_id: str, source_channel: str, message) -> list[str]:
         if not isinstance(getattr(message, "media", None), MessageMediaPhoto):
             return []
@@ -261,6 +270,9 @@ class TelegramService:
             / self._safe_media_part(source_channel)
         )
         directory.mkdir(parents=True, exist_ok=True)
+        existing = self._existing_message_photo(directory, message.id)
+        if existing is not None:
+            return [self._media_url_for_path(existing)]
         downloaded = await client.download_media(message, file=str(directory / f"{message.id}"))
         if not downloaded:
             return []

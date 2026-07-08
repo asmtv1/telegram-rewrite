@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Virtuoso } from "react-virtuoso";
 import {
   Check,
   History,
@@ -12,6 +13,12 @@ import {
   X
 } from "lucide-react";
 import { api, PostItem, TelegramStatus } from "./api";
+import {
+  beginExclusiveRequest,
+  finishExclusiveRequest,
+  isCurrentRequest,
+  type ActiveRequestRef
+} from "./requestGate";
 
 type Notice = {
   kind: "idle" | "loading" | "success" | "error";
@@ -96,6 +103,7 @@ function Workspace({ user, onLogout }: { user: string; onLogout: () => void }) {
   const [hasMore, setHasMore] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice>(idle);
+  const activePostsRequest = useRef<ActiveRequestRef["current"]>(null);
 
   const selected = useMemo(
     () => posts.find((post) => post.id === selectedId) ?? posts[0] ?? null,
@@ -106,23 +114,64 @@ function Workspace({ user, onLogout }: { user: string; onLogout: () => void }) {
     refreshTelegramStatus(setTelegramStatus);
   }, []);
 
+  useEffect(() => {
+    return () => activePostsRequest.current?.controller.abort();
+  }, []);
+
   async function logout() {
     await api.logout();
     onLogout();
   }
 
+  const handleSelectPost = useCallback((postId: number) => {
+    setSelectedId(postId);
+  }, []);
+
+  const postKey = useCallback((_: number, post: PostItem) => post.id, []);
+
+  const renderPost = useCallback(
+    (_: number, post: PostItem) => (
+      <PostRow
+        active={post.id === selected?.id}
+        onSelect={handleSelectPost}
+        post={post}
+      />
+    ),
+    [handleSelectPost, selected?.id]
+  );
+
   async function loadPosts(offset?: number | null) {
+    const normalizedSourceChannel = sourceChannel.trim();
+    const normalizedTargetChannel = targetChannel.trim();
+    const requestKey = [
+      "posts",
+      normalizedSourceChannel,
+      normalizedTargetChannel,
+      offset ?? "first"
+    ].join(":");
+    const request = beginExclusiveRequest(activePostsRequest, requestKey);
+    if (request.status === "duplicate") {
+      return;
+    }
+
     setNotice({ kind: "loading", text: offset ? "Загружаем следующую страницу" : "Загружаем последние посты" });
     try {
-      const page = await api.posts(sourceChannel, targetChannel, offset);
-      // FIX: при подгрузке добавляем старые посты в конец списка, а не в начало
+      const page = await api.posts(normalizedSourceChannel, normalizedTargetChannel, offset, request.controller.signal);
+      if (!isCurrentRequest(activePostsRequest, request.controller)) {
+        return;
+      }
       setPosts((current) => (offset ? [...current, ...page.items] : page.items));
-      setSelectedId((current) => current ?? page.items[0]?.id ?? null);
+      setSelectedId((current) => (offset ? current ?? page.items[0]?.id ?? null : page.items[0]?.id ?? null));
       setNextOffsetId(page.next_offset_id);
       setHasMore(page.has_more);
       setNotice({ kind: "success", text: page.message ?? "Посты загружены" });
     } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
       setNotice({ kind: "error", text: errorMessage(error) });
+    } finally {
+      finishExclusiveRequest(activePostsRequest, request.controller);
     }
   }
 
@@ -199,29 +248,18 @@ function Workspace({ user, onLogout }: { user: string; onLogout: () => void }) {
                 <Plus size={18} /> Подгрузить ещё 10 постов
               </button>
             </div>
-            <div className="post-list">
-              {posts.map((post) => (
-                <article
-                  className={post.id === selected?.id ? "post-row active" : "post-row"}
-                  key={post.id}
-                  onClick={() => setSelectedId(post.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      setSelectedId(post.id);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <span className="post-row-id">#{post.telegram_message_id}</span>
-                  <div className={post.media_urls.length ? "post-row-body" : "post-row-body no-media"}>
-                    <MediaPreview urls={post.media_urls} compact />
-                    <p>{post.original_text}</p>
-                  </div>
-                </article>
-              ))}
-              {posts.length === 0 && <div className="empty">Здесь появятся текстовые посты из Telegram.</div>}
+            <div className="post-list-shell">
+              {posts.length ? (
+                <Virtuoso
+                  className="post-list"
+                  computeItemKey={postKey}
+                  data={posts}
+                  itemContent={renderPost}
+                  style={{ height: "100%" }}
+                />
+              ) : (
+                <div className="empty">Здесь появятся текстовые посты из Telegram.</div>
+              )}
             </div>
           </section>
 
@@ -233,6 +271,46 @@ function Workspace({ user, onLogout }: { user: string; onLogout: () => void }) {
     </section>
   );
 }
+
+const PostRow = memo(function PostRow({
+  active,
+  onSelect,
+  post
+}: {
+  active: boolean;
+  onSelect: (postId: number) => void;
+  post: PostItem;
+}) {
+  const select = useCallback(() => {
+    onSelect(post.id);
+  }, [onSelect, post.id]);
+
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onSelect(post.id);
+      }
+    },
+    [onSelect, post.id]
+  );
+
+  return (
+    <article
+      className={active ? "post-row active" : "post-row"}
+      onClick={select}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+    >
+      <span className="post-row-id">#{post.telegram_message_id}</span>
+      <div className={post.media_urls.length ? "post-row-body" : "post-row-body no-media"}>
+        <MediaPreview urls={post.media_urls} compact />
+        <p>{post.original_text}</p>
+      </div>
+    </article>
+  );
+});
 
 function HistoryView() {
   const [items, setItems] = useState<PostItem[]>([]);
@@ -630,6 +708,10 @@ function errorMessage(error: unknown): string {
     return "Этот вариант уже опубликован. Измените текст, канал или изображения.";
   }
   return error.message;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function formatDate(value: string): string {

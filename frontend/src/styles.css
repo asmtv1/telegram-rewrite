@@ -223,6 +223,11 @@ button.tab:hover:not(.active) {
   align-self: start;
 }
 
+.posts-column {
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: calc(100vh - 122px);
+}
+
 .panel,
 .editor,
 .posts-column {
@@ -260,11 +265,14 @@ button.tab:hover:not(.active) {
   gap: 8px;
 }
 
+.post-list-shell {
+  height: calc(100vh - 220px);
+  min-height: 320px;
+  min-width: 0;
+}
+
 .post-list {
-  display: grid;
-  gap: 10px;
-  max-height: calc(100vh - 160px);
-  overflow: auto;
+  height: 100%;
 }
 
 .post-row {
@@ -276,6 +284,7 @@ button.tab:hover:not(.active) {
   display: grid;
   gap: 10px;
   min-width: 0;
+  margin-bottom: 10px;
   padding: 14px 16px;
   text-align: left;
   transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
@@ -617,6 +626,14 @@ button.tab:hover:not(.active) {
 @media (max-width: 1080px) {
   .layout {
     grid-template-columns: 1fr;
+  }
+
+  .posts-column {
+    max-height: none;
+  }
+
+  .post-list-shell {
+    height: min(70vh, 620px);
   }
 
   .post-list {
