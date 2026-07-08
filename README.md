@@ -278,9 +278,8 @@ npm run build
 - Telegram session files чувствительны; volume `telegram_sessions` нельзя публиковать или коммитить.
 - `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` хранятся только в `.env`; пользовательские Telegram session files остаются в volume `telegram_sessions`.
 
+## Пример работы приложения
 
-Пример работы
 <img width="834" height="480" alt="она" src="https://github.com/user-attachments/assets/763e6f64-eb1d-4911-9d51-2a0cb7643926" />
 
-
-
+![Пример работы приложения](docs/assets/app-demo.gif)
