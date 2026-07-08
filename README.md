@@ -288,6 +288,4 @@ npm run build
 
 ## Пример работы приложения
 
-<img width="834" height="480" alt="она" src="https://github.com/user-attachments/assets/763e6f64-eb1d-4911-9d51-2a0cb7643926" />
-
 ![Пример работы приложения](docs/assets/app-demo.gif)
